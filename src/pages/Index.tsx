@@ -6,8 +6,20 @@ import {
   ShieldCheck,
   Stethoscope,
 } from "lucide-react";
+import { useMemo, useState } from "react";
+import { z } from "zod";
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import heroImage from "@/assets/deephealthx-hero.jpg";
+import { predictReportRisk, type ReportRiskResponse } from "@/lib/reportRiskApi";
+
+const reportSchema = z.object({
+  reportText: z
+    .string()
+    .trim()
+    .min(120, "Medical report must be at least 120 characters")
+    .max(12000, "Medical report is too long"),
+});
 
 const pillars = [
   {
@@ -34,7 +46,46 @@ const pipeline = [
   "Output explainable risk score and care priority",
 ];
 
+const riskTone: Record<NonNullable<ReportRiskResponse["riskLevel"]>, string> = {
+  low: "Low",
+  moderate: "Moderate",
+  high: "High",
+  unknown: "Unknown",
+};
+
 const Index = () => {
+  const [reportText, setReportText] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<ReportRiskResponse | null>(null);
+
+  const charCount = useMemo(() => reportText.trim().length, [reportText]);
+
+  const scrollToSection = (sectionId: string) => {
+    document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const handlePredict = async () => {
+    const parsed = reportSchema.safeParse({ reportText });
+    if (!parsed.success) {
+      setError(parsed.error.issues[0]?.message ?? "Invalid report input");
+      return;
+    }
+
+    setLoading(true);
+    setError("");
+
+    try {
+      const prediction = await predictReportRisk(parsed.data.reportText);
+      setResult(prediction);
+    } catch (predictionError) {
+      setResult(null);
+      setError(predictionError instanceof Error ? predictionError.message : "Prediction failed");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <main className="relative min-h-screen pb-16">
       <div className="dx-signature" aria-hidden="true" />
@@ -61,28 +112,28 @@ const Index = () => {
           <h1 className="dx-title">DEEPHEALTHX Multi-Modal Deep Learning for Early Detection of Heart Disease</h1>
 
           <p className="dx-subtitle">
-            A clinical intelligence layer that reads complex heart signals from multiple modalities and flags high-risk
-            patients earlier, with explainable outputs designed for real hospital workflows.
+            Real model inference is now wired via secure backend endpoint. This release accepts only validated medical
+            report text input for heart-risk prediction.
           </p>
 
           <div className="flex flex-wrap gap-4">
-            <Button size="lg" className="group">
+            <Button size="lg" className="group" onClick={() => scrollToSection("report-inference")}> 
               Request Clinical Demo
               <ArrowRight className="size-4 transition-transform duration-300 group-hover:translate-x-1" />
             </Button>
-            <Button size="lg" variant="outline">
+            <Button size="lg" variant="outline" onClick={() => scrollToSection("model-pipeline")}>
               View Model Pipeline
             </Button>
           </div>
 
           <div className="grid gap-3 sm:grid-cols-3">
             <article className="dx-kpi">
-              <p className="dx-kpi-value">4</p>
-              <p className="dx-kpi-label">Data modalities fused</p>
+              <p className="dx-kpi-value">1</p>
+              <p className="dx-kpi-label">Input allowed (medical reports)</p>
             </article>
             <article className="dx-kpi">
-              <p className="dx-kpi-value">Early</p>
-              <p className="dx-kpi-label">Signal-stage detection</p>
+              <p className="dx-kpi-value">API</p>
+              <p className="dx-kpi-label">External medical model</p>
             </article>
             <article className="dx-kpi">
               <p className="dx-kpi-value">XAI</p>
@@ -101,6 +152,48 @@ const Index = () => {
         </figure>
       </section>
 
+      <section id="report-inference" className="dx-shell mt-16 md:mt-20">
+        <div className="dx-glass p-6 md:p-8">
+          <div className="mb-5 flex items-center gap-3">
+            <Stethoscope className="size-5 text-primary" />
+            <h2 className="text-2xl font-semibold">Report-Only Clinical Inference</h2>
+          </div>
+
+          <p className="mb-4 text-muted-foreground">
+            Allowed input: medical report text only. Scans/images are intentionally blocked in this endpoint.
+          </p>
+
+          <div className="space-y-4">
+            <Textarea
+              value={reportText}
+              onChange={(event) => setReportText(event.target.value)}
+              placeholder="Paste a de-identified cardiology report, ECG interpretation, or physician summary..."
+              className="min-h-40"
+            />
+
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-sm text-muted-foreground">{charCount} / 12000 characters (min 120)</p>
+              <Button onClick={handlePredict} disabled={loading}>
+                {loading ? "Analyzing report..." : "Run Risk Prediction"}
+              </Button>
+            </div>
+
+            {error ? <p className="text-sm font-medium text-destructive">{error}</p> : null}
+
+            {result ? (
+              <article className="rounded-xl border bg-background/70 p-5">
+                <p className="text-sm font-semibold text-primary">Prediction result</p>
+                <h3 className="mt-2 text-xl font-semibold">
+                  Risk Level: {riskTone[result.riskLevel]}{" "}
+                  {typeof result.riskScore === "number" ? `(${Math.round(result.riskScore * 100)}%)` : ""}
+                </h3>
+                <p className="mt-2 text-muted-foreground">{result.summary}</p>
+              </article>
+            ) : null}
+          </div>
+        </div>
+      </section>
+
       <section className="dx-shell mt-16 grid gap-5 md:mt-20 md:grid-cols-3">
         {pillars.map((item) => {
           const Icon = item.icon;
@@ -114,7 +207,7 @@ const Index = () => {
         })}
       </section>
 
-      <section className="dx-shell mt-16 md:mt-20">
+      <section id="model-pipeline" className="dx-shell mt-16 md:mt-20">
         <div className="dx-glass p-8 md:p-10">
           <div className="mb-6 flex items-center gap-3">
             <Stethoscope className="size-5 text-primary" />
