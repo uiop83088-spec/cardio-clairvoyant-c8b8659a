@@ -79,6 +79,7 @@ serve(async (req) => {
     if (!MEDICAL_MODEL_API_URL) {
       throw new Error("MEDICAL_MODEL_API_URL is not configured");
     }
+    const modelApiUrl = parseModelApiUrl(MEDICAL_MODEL_API_URL);
 
     const MEDICAL_MODEL_API_KEY = Deno.env.get("MEDICAL_MODEL_API_KEY");
     if (!MEDICAL_MODEL_API_KEY) {
