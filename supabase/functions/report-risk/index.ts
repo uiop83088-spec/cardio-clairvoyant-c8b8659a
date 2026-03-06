@@ -26,6 +26,23 @@ function hasAllowedExtension(fileName: string): boolean {
   return ALLOWED_SCAN_EXTENSIONS.some((extension) => normalized.endsWith(extension));
 }
 
+function parseModelApiUrl(rawUrl: string): string {
+  const trimmedUrl = rawUrl.trim();
+  let parsed: URL;
+
+  try {
+    parsed = new URL(trimmedUrl);
+  } catch {
+    throw new Error("MEDICAL_MODEL_API_URL is invalid. It must be a full URL like https://api.example.com/predict");
+  }
+
+  if (!parsed.protocol || (parsed.protocol !== "https:" && parsed.protocol !== "http:")) {
+    throw new Error("MEDICAL_MODEL_API_URL must start with http:// or https://");
+  }
+
+  return parsed.toString();
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -62,6 +79,7 @@ serve(async (req) => {
     if (!MEDICAL_MODEL_API_URL) {
       throw new Error("MEDICAL_MODEL_API_URL is not configured");
     }
+    const modelApiUrl = parseModelApiUrl(MEDICAL_MODEL_API_URL);
 
     const MEDICAL_MODEL_API_KEY = Deno.env.get("MEDICAL_MODEL_API_KEY");
     if (!MEDICAL_MODEL_API_KEY) {
@@ -125,7 +143,7 @@ serve(async (req) => {
       };
     }
 
-    const upstreamResponse = await fetch(MEDICAL_MODEL_API_URL, {
+    const upstreamResponse = await fetch(modelApiUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
