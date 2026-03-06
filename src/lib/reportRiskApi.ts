@@ -5,10 +5,23 @@ export interface ReportRiskResponse {
   riskLevel: "low" | "moderate" | "high" | "unknown";
   summary: string;
   source: string;
+  acceptedInput: "report" | "scan";
   raw?: unknown;
 }
 
-export async function predictReportRisk(reportText: string): Promise<ReportRiskResponse> {
+export type InferenceInput =
+  | {
+      inputType: "report";
+      reportText: string;
+    }
+  | {
+      inputType: "scan";
+      scanBase64: string;
+      scanFileName: string;
+      scanMimeType: string;
+    };
+
+export async function predictRisk(input: InferenceInput): Promise<ReportRiskResponse> {
   const response = await fetch(FUNCTION_URL, {
     method: "POST",
     headers: {
@@ -16,7 +29,7 @@ export async function predictReportRisk(reportText: string): Promise<ReportRiskR
       Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
       apikey: import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
     },
-    body: JSON.stringify({ reportText }),
+    body: JSON.stringify(input),
   });
 
   const payload = await response.json().catch(() => ({ error: "Invalid server response" }));

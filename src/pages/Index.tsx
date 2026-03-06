@@ -5,13 +5,15 @@ import {
   HeartPulse,
   ShieldCheck,
   Stethoscope,
+  Upload,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { z } from "zod";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import heroImage from "@/assets/deephealthx-hero.jpg";
-import { predictReportRisk, type ReportRiskResponse } from "@/lib/reportRiskApi";
+import { predictRisk, type ReportRiskResponse } from "@/lib/reportRiskApi";
 
 const reportSchema = z.object({
   reportText: z
@@ -20,6 +22,10 @@ const reportSchema = z.object({
     .min(120, "Medical report must be at least 120 characters")
     .max(12000, "Medical report is too long"),
 });
+
+const ALLOWED_SCAN_MIME_TYPES = ["image/png", "image/jpeg", "application/dicom"];
+const ALLOWED_SCAN_EXTENSIONS = [".png", ".jpg", ".jpeg", ".dcm", ".dicom"];
+const MAX_SCAN_SIZE = 10 * 1024 * 1024;
 
 const pillars = [
   {
@@ -53,8 +59,29 @@ const riskTone: Record<NonNullable<ReportRiskResponse["riskLevel"]>, string> = {
   unknown: "Unknown",
 };
 
+const fileToBase64 = (file: File) =>
+  new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      const base64 = result.includes(",") ? result.split(",")[1] : result;
+      if (!base64) {
+        reject(new Error("Unable to read scan image"));
+        return;
+      }
+      resolve(base64);
+    };
+    reader.onerror = () => reject(new Error("Unable to read scan image"));
+    reader.readAsDataURL(file);
+  });
+
+const hasAllowedScanExtension = (fileName: string) =>
+  ALLOWED_SCAN_EXTENSIONS.some((extension) => fileName.toLowerCase().endsWith(extension));
+
 const Index = () => {
+  const [inputType, setInputType] = useState<"report" | "scan">("report");
   const [reportText, setReportText] = useState("");
+  const [scanFile, setScanFile] = useState<File | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<ReportRiskResponse | null>(null);
@@ -65,21 +92,72 @@ const Index = () => {
     document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
-  const handlePredict = async () => {
-    const parsed = reportSchema.safeParse({ reportText });
-    if (!parsed.success) {
-      setError(parsed.error.issues[0]?.message ?? "Invalid report input");
+  const handleScanSelection = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0] ?? null;
+    setError("");
+    setResult(null);
+
+    if (!file) {
+      setScanFile(null);
       return;
     }
 
-    setLoading(true);
-    setError("");
+    if (file.size > MAX_SCAN_SIZE) {
+      setScanFile(null);
+      setError("Scan file is too large (max 10MB)");
+      return;
+    }
 
+    if (!hasAllowedScanExtension(file.name)) {
+      setScanFile(null);
+      setError("Only .png, .jpg, .jpeg, .dcm, .dicom files are allowed");
+      return;
+    }
+
+    if (!ALLOWED_SCAN_MIME_TYPES.includes(file.type) && file.type !== "") {
+      setScanFile(null);
+      setError("Unsupported scan file type");
+      return;
+    }
+
+    setScanFile(file);
+  };
+
+  const handlePredict = async () => {
+    setError("");
+    setResult(null);
+
+    setLoading(true);
     try {
-      const prediction = await predictReportRisk(parsed.data.reportText);
+      if (inputType === "report") {
+        const parsed = reportSchema.safeParse({ reportText });
+        if (!parsed.success) {
+          setError(parsed.error.issues[0]?.message ?? "Invalid report input");
+          return;
+        }
+
+        const prediction = await predictRisk({
+          inputType: "report",
+          reportText: parsed.data.reportText,
+        });
+        setResult(prediction);
+        return;
+      }
+
+      if (!scanFile) {
+        setError("Please upload a medical scan image file first");
+        return;
+      }
+
+      const scanBase64 = await fileToBase64(scanFile);
+      const prediction = await predictRisk({
+        inputType: "scan",
+        scanBase64,
+        scanFileName: scanFile.name,
+        scanMimeType: scanFile.type || "image/jpeg",
+      });
       setResult(prediction);
     } catch (predictionError) {
-      setResult(null);
       setError(predictionError instanceof Error ? predictionError.message : "Prediction failed");
     } finally {
       setLoading(false);
@@ -112,12 +190,12 @@ const Index = () => {
           <h1 className="dx-title">DEEPHEALTHX Multi-Modal Deep Learning for Early Detection of Heart Disease</h1>
 
           <p className="dx-subtitle">
-            Real model inference is now wired via secure backend endpoint. This release accepts only validated medical
-            report text input for heart-risk prediction.
+            Real model inference supports de-identified report text and medical scan files, with strict validation and
+            secure backend processing.
           </p>
 
           <div className="flex flex-wrap gap-4">
-            <Button size="lg" className="group" onClick={() => scrollToSection("report-inference")}> 
+            <Button size="lg" className="group" onClick={() => scrollToSection("report-inference")}>
               Request Clinical Demo
               <ArrowRight className="size-4 transition-transform duration-300 group-hover:translate-x-1" />
             </Button>
@@ -128,8 +206,8 @@ const Index = () => {
 
           <div className="grid gap-3 sm:grid-cols-3">
             <article className="dx-kpi">
-              <p className="dx-kpi-value">1</p>
-              <p className="dx-kpi-label">Input allowed (medical reports)</p>
+              <p className="dx-kpi-value">2</p>
+              <p className="dx-kpi-label">Input modes (report + scan)</p>
             </article>
             <article className="dx-kpi">
               <p className="dx-kpi-value">API</p>
@@ -156,41 +234,82 @@ const Index = () => {
         <div className="dx-glass p-6 md:p-8">
           <div className="mb-5 flex items-center gap-3">
             <Stethoscope className="size-5 text-primary" />
-            <h2 className="text-2xl font-semibold">Report-Only Clinical Inference</h2>
+            <h2 className="text-2xl font-semibold">Clinical Inference</h2>
           </div>
 
-          <p className="mb-4 text-muted-foreground">
-            Allowed input: medical report text only. Scans/images are intentionally blocked in this endpoint.
-          </p>
+          <div className="mb-4 flex flex-wrap gap-3">
+            <Button
+              variant={inputType === "report" ? "default" : "outline"}
+              onClick={() => {
+                setInputType("report");
+                setError("");
+                setResult(null);
+              }}
+            >
+              Report Text
+            </Button>
+            <Button
+              variant={inputType === "scan" ? "default" : "outline"}
+              onClick={() => {
+                setInputType("scan");
+                setError("");
+                setResult(null);
+              }}
+            >
+              Scan Image
+            </Button>
+          </div>
 
-          <div className="space-y-4">
-            <Textarea
-              value={reportText}
-              onChange={(event) => setReportText(event.target.value)}
-              placeholder="Paste a de-identified cardiology report, ECG interpretation, or physician summary..."
-              className="min-h-40"
-            />
-
-            <div className="flex flex-wrap items-center justify-between gap-3">
+          {inputType === "report" ? (
+            <div className="space-y-4">
+              <p className="text-muted-foreground">Paste a de-identified medical report.</p>
+              <Textarea
+                value={reportText}
+                onChange={(event) => setReportText(event.target.value)}
+                placeholder="Paste cardiology report, ECG interpretation, or physician summary..."
+                className="min-h-40"
+              />
               <p className="text-sm text-muted-foreground">{charCount} / 12000 characters (min 120)</p>
-              <Button onClick={handlePredict} disabled={loading}>
-                {loading ? "Analyzing report..." : "Run Risk Prediction"}
-              </Button>
             </div>
+          ) : (
+            <div className="space-y-4">
+              <p className="text-muted-foreground">
+                Upload only de-identified cardiac scan files (.png, .jpg, .jpeg, .dcm, .dicom).
+              </p>
+              <label className="dx-card block cursor-pointer p-4">
+                <span className="mb-2 inline-flex items-center gap-2 text-sm font-semibold">
+                  <Upload className="size-4" />
+                  Select scan file
+                </span>
+                <Input
+                  type="file"
+                  accept=".png,.jpg,.jpeg,.dcm,.dicom,image/png,image/jpeg,application/dicom"
+                  onChange={handleScanSelection}
+                />
+                <span className="mt-2 block text-sm text-muted-foreground">
+                  {scanFile ? `Selected: ${scanFile.name}` : "No file selected"}
+                </span>
+              </label>
+            </div>
+          )}
 
-            {error ? <p className="text-sm font-medium text-destructive">{error}</p> : null}
-
-            {result ? (
-              <article className="rounded-xl border bg-background/70 p-5">
-                <p className="text-sm font-semibold text-primary">Prediction result</p>
-                <h3 className="mt-2 text-xl font-semibold">
-                  Risk Level: {riskTone[result.riskLevel]}{" "}
-                  {typeof result.riskScore === "number" ? `(${Math.round(result.riskScore * 100)}%)` : ""}
-                </h3>
-                <p className="mt-2 text-muted-foreground">{result.summary}</p>
-              </article>
-            ) : null}
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <Button onClick={handlePredict} disabled={loading}>
+              {loading ? "Analyzing..." : `Run ${inputType === "report" ? "Report" : "Scan"} Prediction`}
+            </Button>
           </div>
+
+          {error ? <p className="mt-4 text-sm font-medium text-destructive">{error}</p> : null}
+
+          {result ? (
+            <article className="mt-4 rounded-xl border bg-background/70 p-5">
+              <p className="text-sm font-semibold text-primary">Prediction result ({result.acceptedInput})</p>
+              <h3 className="mt-2 text-xl font-semibold">
+                Risk Level: {riskTone[result.riskLevel]} {typeof result.riskScore === "number" ? `(${Math.round(result.riskScore * 100)}%)` : ""}
+              </h3>
+              <p className="mt-2 text-muted-foreground">{result.summary}</p>
+            </article>
+          ) : null}
         </div>
       </section>
 
