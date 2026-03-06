@@ -11,6 +11,8 @@ const MAX_REPORT_LENGTH = 12000;
 const MAX_SCAN_BASE64_LENGTH = 14 * 1024 * 1024;
 const ALLOWED_SCAN_MIME_TYPES = ["image/png", "image/jpeg", "application/dicom"];
 const ALLOWED_SCAN_EXTENSIONS = [".png", ".jpg", ".jpeg", ".dcm", ".dicom"];
+const LOVABLE_AI_URL = "https://ai.gateway.lovable.dev/v1/chat/completions";
+const DEFAULT_MODEL = "google/gemini-3-flash-preview";
 
 type InputType = "report" | "scan";
 
@@ -26,21 +28,44 @@ function hasAllowedExtension(fileName: string): boolean {
   return ALLOWED_SCAN_EXTENSIONS.some((extension) => normalized.endsWith(extension));
 }
 
-function parseModelApiUrl(rawUrl: string): string {
-  const trimmedUrl = rawUrl.trim();
-  let parsed: URL;
+function clampRiskScore(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(1, parsed)) : null;
+}
 
-  try {
-    parsed = new URL(trimmedUrl);
-  } catch {
-    throw new Error("MEDICAL_MODEL_API_URL is invalid. It must be a full URL like https://api.example.com/predict");
+function safeSummary(value: unknown): string {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim().slice(0, 500)
+    : "Model response received successfully.";
+}
+
+function jsonResponse(body: Record<string, unknown>, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
+function parseToolArguments(gatewayBody: any): { risk_score?: number; summary?: string } {
+  const toolArgsRaw = gatewayBody?.choices?.[0]?.message?.tool_calls?.[0]?.function?.arguments;
+  if (typeof toolArgsRaw === "string") {
+    try {
+      return JSON.parse(toolArgsRaw);
+    } catch {
+      // Continue to fallback
+    }
   }
 
-  if (!parsed.protocol || (parsed.protocol !== "https:" && parsed.protocol !== "http:")) {
-    throw new Error("MEDICAL_MODEL_API_URL must start with http:// or https://");
+  const contentRaw = gatewayBody?.choices?.[0]?.message?.content;
+  if (typeof contentRaw === "string") {
+    try {
+      return JSON.parse(contentRaw);
+    } catch {
+      // Ignore fallback parse errors
+    }
   }
 
-  return parsed.toString();
+  return {};
 }
 
 serve(async (req) => {
@@ -50,143 +75,156 @@ serve(async (req) => {
 
   try {
     if (req.method !== "POST") {
-      return new Response(JSON.stringify({ error: "Method not allowed" }), {
-        status: 405,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return jsonResponse({ error: "Method not allowed" }, 405);
     }
 
     const authorization = req.headers.get("authorization") ?? "";
     const apikey = req.headers.get("apikey") ?? "";
     if (!authorization.startsWith("Bearer ") && apikey.length === 0) {
-      return new Response(JSON.stringify({ error: "Missing authorization or apikey header" }), {
-        status: 401,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return jsonResponse({ error: "Missing authorization or apikey header" }, 401);
     }
 
     const body = await req.json();
-
     const inputType: InputType | null = body?.inputType === "report" || body?.inputType === "scan" ? body.inputType : null;
+
     if (!inputType) {
-      return new Response(JSON.stringify({ error: "inputType must be 'report' or 'scan'" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return jsonResponse({ error: "inputType must be 'report' or 'scan'" }, 400);
     }
 
-    const MEDICAL_MODEL_API_URL = Deno.env.get("MEDICAL_MODEL_API_URL");
-    if (!MEDICAL_MODEL_API_URL) {
-      throw new Error("MEDICAL_MODEL_API_URL is not configured");
-    }
-    const modelApiUrl = parseModelApiUrl(MEDICAL_MODEL_API_URL);
-
-    const MEDICAL_MODEL_API_KEY = Deno.env.get("MEDICAL_MODEL_API_KEY");
-    if (!MEDICAL_MODEL_API_KEY) {
-      throw new Error("MEDICAL_MODEL_API_KEY is not configured");
+    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
+    if (!LOVABLE_API_KEY) {
+      throw new Error("LOVABLE_API_KEY is not configured");
     }
 
-    let upstreamPayload: Record<string, unknown>;
+    let userContent: string | Array<Record<string, unknown>>;
 
     if (inputType === "report") {
       const reportText = typeof body?.reportText === "string" ? body.reportText.trim() : "";
 
       if (reportText.length < MIN_REPORT_LENGTH || reportText.length > MAX_REPORT_LENGTH) {
-        return new Response(
-          JSON.stringify({
-            error: `Report text must be between ${MIN_REPORT_LENGTH} and ${MAX_REPORT_LENGTH} characters`,
-          }),
-          {
-            status: 400,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-          },
+        return jsonResponse(
+          { error: `Report text must be between ${MIN_REPORT_LENGTH} and ${MAX_REPORT_LENGTH} characters` },
+          400,
         );
       }
 
-      upstreamPayload = {
-        modality: "medical_report",
-        task: "heart_disease_early_risk",
-        report_text: reportText,
-      };
+      userContent = `Input modality: de-identified clinical report text.\n\nReport:\n${reportText}`;
     } else {
-      const scanBase64 = typeof body?.scanBase64 === "string" ? body.scanBase64.trim() : "";
+      const scanBase64Raw = typeof body?.scanBase64 === "string" ? body.scanBase64.trim() : "";
       const scanFileName = typeof body?.scanFileName === "string" ? body.scanFileName.trim() : "";
       const scanMimeType = typeof body?.scanMimeType === "string" ? body.scanMimeType.trim().toLowerCase() : "";
 
-      if (!scanBase64 || scanBase64.length > MAX_SCAN_BASE64_LENGTH) {
-        return new Response(JSON.stringify({ error: "Invalid scan file payload size" }), {
-          status: 400,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
+      if (!scanBase64Raw || scanBase64Raw.length > MAX_SCAN_BASE64_LENGTH) {
+        return jsonResponse({ error: "Invalid scan file payload size" }, 400);
       }
 
       if (!scanFileName || !hasAllowedExtension(scanFileName)) {
-        return new Response(JSON.stringify({ error: "Only .png, .jpg, .jpeg, .dcm, .dicom scan files are allowed" }), {
-          status: 400,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
+        return jsonResponse({ error: "Only .png, .jpg, .jpeg, .dcm, .dicom scan files are allowed" }, 400);
       }
 
       if (!ALLOWED_SCAN_MIME_TYPES.includes(scanMimeType)) {
-        return new Response(JSON.stringify({ error: "Unsupported scan mime type" }), {
-          status: 400,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
+        return jsonResponse({ error: "Unsupported scan mime type" }, 400);
       }
 
-      upstreamPayload = {
-        modality: "cardiac_scan",
-        task: "heart_disease_early_risk_scan",
-        scan_image_base64: scanBase64,
-        scan_file_name: scanFileName,
-        scan_mime_type: scanMimeType,
-      };
+      const scanBase64 = scanBase64Raw.includes(",") ? scanBase64Raw.split(",").pop() ?? "" : scanBase64Raw;
+
+      userContent = [
+        {
+          type: "text",
+          text:
+            "Input modality: cardiac scan image. Review the image and estimate early heart disease risk using conservative, safety-first reasoning.",
+        },
+        {
+          type: "image_url",
+          image_url: {
+            url: `data:${scanMimeType};base64,${scanBase64}`,
+          },
+        },
+      ];
     }
 
-    const upstreamResponse = await fetch(modelApiUrl, {
+    const gatewayResponse = await fetch(LOVABLE_AI_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${MEDICAL_MODEL_API_KEY}`,
+        Authorization: `Bearer ${LOVABLE_API_KEY}`,
       },
-      body: JSON.stringify(upstreamPayload),
+      body: JSON.stringify({
+        model: DEFAULT_MODEL,
+        temperature: 0.1,
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are a cautious clinical risk stratification assistant. Produce only a probabilistic early-risk estimate from provided input. Do not diagnose. Return concise, factual medical reasoning.",
+          },
+          {
+            role: "user",
+            content: userContent,
+          },
+        ],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "return_risk_assessment",
+              description: "Return normalized risk score and concise summary.",
+              parameters: {
+                type: "object",
+                properties: {
+                  risk_score: {
+                    type: "number",
+                    description: "Probability from 0.0 to 1.0.",
+                  },
+                  summary: {
+                    type: "string",
+                    description: "Up to 500 characters; concise and clinically neutral.",
+                  },
+                },
+                required: ["risk_score", "summary"],
+                additionalProperties: false,
+              },
+            },
+          },
+        ],
+        tool_choice: {
+          type: "function",
+          function: {
+            name: "return_risk_assessment",
+          },
+        },
+      }),
     });
 
-    const upstreamBody = await upstreamResponse.json().catch(() => ({}));
+    if (!gatewayResponse.ok) {
+      if (gatewayResponse.status === 429) {
+        return jsonResponse({ error: "Rate limits exceeded, please try again later." }, 429);
+      }
+      if (gatewayResponse.status === 402) {
+        return jsonResponse({ error: "Payment required, please add funds to your Lovable AI workspace." }, 402);
+      }
 
-    if (!upstreamResponse.ok) {
-      throw new Error(`Model API request failed [${upstreamResponse.status}]`);
+      const errText = await gatewayResponse.text().catch(() => "");
+      console.error("AI gateway error:", gatewayResponse.status, errText);
+      return jsonResponse({ error: `AI gateway error [${gatewayResponse.status}]` }, 500);
     }
 
-    const parsedRiskScore = Number(upstreamBody?.risk_score);
-    const riskScore = Number.isFinite(parsedRiskScore)
-      ? Math.max(0, Math.min(1, parsedRiskScore))
-      : null;
+    const gatewayBody = await gatewayResponse.json().catch(() => ({}));
+    const structured = parseToolArguments(gatewayBody);
 
-    const summary =
-      typeof upstreamBody?.summary === "string" && upstreamBody.summary.trim().length > 0
-        ? upstreamBody.summary.trim().slice(0, 500)
-        : "Model response received successfully.";
+    const riskScore = clampRiskScore(structured?.risk_score);
+    const summary = safeSummary(structured?.summary);
 
-    return new Response(
-      JSON.stringify({
-        riskScore,
-        riskLevel: normalizeRiskLevel(riskScore),
-        summary,
-        source: "external-medical-model",
-        acceptedInput: inputType,
-        raw: upstreamBody,
-      }),
-      {
-        status: 200,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      },
-    );
+    return jsonResponse({
+      riskScore,
+      riskLevel: normalizeRiskLevel(riskScore),
+      summary,
+      source: "lovable-ai-gateway",
+      acceptedInput: inputType,
+      raw: gatewayBody,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
-    return new Response(JSON.stringify({ error: message }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    return jsonResponse({ error: message }, 500);
   }
 });
