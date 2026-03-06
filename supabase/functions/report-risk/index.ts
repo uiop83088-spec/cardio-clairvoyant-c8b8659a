@@ -143,7 +143,7 @@ serve(async (req) => {
       };
     }
 
-    const upstreamResponse = await fetch(MEDICAL_MODEL_API_URL, {
+    const upstreamResponse = await fetch(modelApiUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
